@@ -11,5 +11,14 @@ pub struct Authentication {
 
 #[async_trait]
 pub trait Service {
-    async fn get_auth(params: &HashMap<String, String>) -> Result<Authentication, String>;
+    async fn get_auth(&self, params: &HashMap<String, String>) -> Result<Authentication, String>;
+}
+pub type ServiceMap = HashMap<String, Box<dyn Service + Send + Sync>>;
+
+lazy_static! {
+    pub static ref SERVICE_MAP: ServiceMap = {
+        let mut m: ServiceMap = HashMap::new();
+        m.insert("bilibili".to_string(), Box::new(BilibiliService::new()));
+        m
+    };
 }

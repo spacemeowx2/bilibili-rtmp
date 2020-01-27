@@ -3,7 +3,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
 use bytes::{Bytes, BytesMut, BufMut};
 use rml_rtmp::sessions::{ServerSession, ServerSessionConfig, ServerSessionResult, ServerSessionEvent, ServerSessionError};
-use crate::services::Service;
+use crate::services::{Service, ServiceMap};
 
 #[derive(Debug, Fail)]
 pub enum ServerError {
@@ -13,6 +13,8 @@ pub enum ServerError {
     SocketClosed,
     #[fail(display = "ServerSessionError: {}", 0)]
     ServerSessionError(ServerSessionError),
+    #[fail(display = "State Error: {}", 0)]
+    StateError(String),
 }
 
 impl From<io::Error> for ServerError {
@@ -30,18 +32,19 @@ enum PullState {
 }
 
 pub struct Server {
-    state: PullState,
+    map: &'static ServiceMap
 }
 
 impl Server {
-    pub fn new() -> Self {
+    pub fn new(map: &'static ServiceMap) -> Self {
         Self {
-            state: PullState::Handshaking(Handshake::new(PeerType::Server)),
+            map
         }
     }
     pub async fn process(&mut self, socket: &mut TcpStream) -> Result<(), failure::Error> {
-        // let mut buffer = [0; 1024];
         let mut buffer = BytesMut::with_capacity(4096);
+        let mut state: PullState = PullState::Handshaking(Handshake::new(PeerType::Server));
+        let mut client = Client::new();
 
         loop {
             match socket.read_buf(&mut buffer).await {
@@ -56,7 +59,7 @@ impl Server {
 
             let mut new_state: Option<PullState>;
             while buffer.len() > 0 {
-                new_state = match &mut self.state {
+                new_state = match &mut state {
                     PullState::Handshaking(handshake) => {
                         Self::handle_handshake(socket, handshake, &mut buffer).await?
                     },
@@ -72,8 +75,8 @@ impl Server {
                     PullState::Closed => break,
                     other => None,
                 };
-                if let Some(state) = new_state {
-                    self.state = state;
+                if let Some(new_state) = new_state {
+                    state = new_state;
                 }
             }
         }
@@ -94,7 +97,8 @@ impl Server {
                     request_id,
                     app_name,
                 }) => {
-                    println!("Server result received: {:?}", x);
+                    println!("ConnectionRequested: {:?} {:?}", request_id, app_name);
+
                 }
                 x => println!("Server result received: {:?}", x),
             }
@@ -143,6 +147,30 @@ impl Server {
 
                 Ok(Some(PullState::Connecting))
             }
+        }
+    }
+}
+
+enum ClientState {
+    Handshaking(Handshake),
+    Connecting,
+}
+
+struct Client {
+    state: ClientState,
+}
+
+impl Client {
+    fn new() -> Self {
+        Self {
+            state: ClientState::Handshaking(Handshake::new(PeerType::Client)),
+        }
+    }
+    fn connect(&mut self) -> Result<(), ServerError> {
+        if let ClientState::Handshaking(_handshake) = &self.state {
+            Ok(())
+        } else {
+            Err(ServerError::StateError(String::from("should be Handshaking")))
         }
     }
 }

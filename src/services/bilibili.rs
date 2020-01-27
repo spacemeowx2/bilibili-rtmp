@@ -12,7 +12,7 @@ impl BilibiliService {
 
 #[async_trait]
 impl Service for BilibiliService {
-    async fn get_auth(params: &HashMap<String, String>) -> Result<Authentication, String> {
+    async fn get_auth(&self, params: &HashMap<String, String>) -> Result<Authentication, String> {
         Err(String::from("Not implemented"))
     }
 }
