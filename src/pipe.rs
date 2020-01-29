@@ -38,7 +38,6 @@ enum PullState {
     Connecting,
     Connected {
         session: ServerSession,
-        client: Client,
     },
     Pulling,
     Closed,
@@ -48,7 +47,7 @@ struct Connection {}
 
 pub struct Server {
     map: &'static ServiceMap,
-    request: HashMap<u32, Connection>,
+    request: HashMap<u32, Option<Client>>,
 }
 
 impl Server {
@@ -84,9 +83,8 @@ impl Server {
                     },
                     PullState::Connected {
                         session,
-                        client,
                     } => {
-                        self.handle_connected(socket, client, session, &mut buffer).await?
+                        self.handle_connected(socket, session, &mut buffer).await?
                     },
                     PullState::Closed => break,
                     other => None,
@@ -122,6 +120,7 @@ impl Server {
                         stream_key,
                         mode,
                     }) => {
+
                         next.append(&mut session.accept_request(request_id)?);
                     },
                     ServerSessionResult::RaisedEvent(ServerSessionEvent::AudioDataReceived {
@@ -152,7 +151,7 @@ impl Server {
         Ok(())
     }
 
-    async fn handle_connected(&mut self, socket: &mut TcpStream, client: &mut Client, session: &mut ServerSession, bytes: &mut BytesMut) -> Result<Option<PullState>, ServerError> {
+    async fn handle_connected(&mut self, socket: &mut TcpStream, session: &mut ServerSession, bytes: &mut BytesMut) -> Result<Option<PullState>, ServerError> {
         let session_results = match session.handle_input(bytes) {
             Ok(results) => results,
             Err(err) => return Err(ServerError::ServerSessionError(err)),
@@ -170,7 +169,6 @@ impl Server {
 
         Ok(Some(PullState::Connected {
             session,
-            client: Client::new(self.map),
         }))
     }
 
