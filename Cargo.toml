@@ -16,3 +16,4 @@ async-trait = "0.1.22"
 lazy_static = "1.4.0"
 reqwest = { version = "0.10.1", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
+url = "2.1.1"

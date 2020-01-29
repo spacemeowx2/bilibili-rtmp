@@ -3,9 +3,9 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::prelude::*;
 use bytes::{Bytes, BytesMut, BufMut};
 use rml_rtmp::sessions::{ServerSession, ServerSessionConfig, ServerSessionResult, ServerSessionEvent, ServerSessionError};
-use crate::services::{Service, ServiceMap};
+use crate::services::{Service, ServiceMap, BoxService, Authentication};
 use std::collections::HashMap;
-
+use url::{Url, ParseError};
 
 #[derive(Debug, Fail)]
 pub enum ServerError {
@@ -33,6 +33,12 @@ impl From<ServerSessionError> for ServerError {
     }
 }
 
+impl From<String> for ServerError {
+    fn from(error: String) -> Self {
+        ServerError::ClientError(error)
+    }
+}
+
 enum PullState {
     Handshaking(Handshake),
     Connecting,
@@ -44,17 +50,19 @@ enum PullState {
 }
 
 struct Connection {}
+#[derive(Hash, Eq, PartialEq, Debug)]
+struct AppKey(String, String);
 
 pub struct Server {
     map: &'static ServiceMap,
-    request: HashMap<u32, Option<Client>>,
+    channel: HashMap<AppKey, Client>,
 }
 
 impl Server {
     pub fn new(map: &'static ServiceMap) -> Self {
         Self {
             map,
-            request: HashMap::new(),
+            channel: HashMap::new(),
         }
     }
     pub async fn process(&mut self, socket: &mut TcpStream) -> Result<(), failure::Error> {
@@ -120,8 +128,19 @@ impl Server {
                         stream_key,
                         mode,
                     }) => {
-
-                        next.append(&mut session.accept_request(request_id)?);
+                        let service = self.map.get(&app_name);
+                        if let Some(service) = service {
+                            let mut client = Client::new(service);
+                            client.connect(&stream_key).await?;
+                            self.channel.insert(
+                                AppKey(app_name, stream_key),
+                                client
+                            );
+                            next.append(&mut session.accept_request(request_id)?);
+                        } else {
+                            println!("Could not find service for {}", app_name);
+                            socket.shutdown().await?;
+                        }
                     },
                     ServerSessionResult::RaisedEvent(ServerSessionEvent::AudioDataReceived {
                         app_name,
@@ -135,6 +154,7 @@ impl Server {
                         data,
                         timestamp,
                     }) => {},
+                    ServerSessionResult::RaisedEvent(ServerSessionEvent::UnhandleableAmf0Command { .. }) => {},
                     // ServerSessionResult::RaisedEvent(ServerSessionEvent::StreamMetadataChanged {
                     //     app_name,
                     //     stream_key,
@@ -212,28 +232,25 @@ enum ClientState {
 
 struct Client {
     state: ClientState,
-    map: &'static ServiceMap,
+    service: &'static BoxService,
 }
 
 impl Client {
-    fn new(map: &'static ServiceMap) -> Self {
+    fn new(service: &'static BoxService) -> Self {
         Self {
             state: ClientState::Handshaking(Handshake::new(PeerType::Client)),
-            map,
+            service,
         }
     }
-    async fn connect(&mut self, request_id: u32, app_name: String) -> Result<(), ServerError> {
-        match (&self.state, self.map.get(&app_name)) {
-            (ClientState::Handshaking(_handshake), Some(clinet)) => {
+    async fn connect(&mut self, key: &str) -> Result<(), ServerError> {
+        match &self.state {
+            ClientState::Handshaking(_handshake) => {
+                let Authentication { url, key } = self.service.get_auth(key).await?;
+                println!("Get URL and key: {}, {:?}", url, key);
 
                 Ok(())
             },
-            (_, None) => Err(ServerError::ClientError(String::from("service is not found"))),
-            (_, _) => Err(ServerError::StateError(String::from("should be Handshaking"))),
+            _ => Err(ServerError::StateError(String::from("should be Handshaking"))),
         }
-    }
-    async fn get_url_key(&mut self, service: &Box<dyn Service + Send + Sync>) -> Result<(), ServerError> {
-        // service.get_auth
-        Ok(())
     }
 }

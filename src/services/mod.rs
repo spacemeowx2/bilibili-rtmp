@@ -5,15 +5,16 @@ pub use async_trait::async_trait;
 pub use bilibili::BilibiliService;
 
 pub struct Authentication {
-    url: String,
-    key: Option<String>,
+    pub url: String,
+    pub key: Option<String>,
 }
 
 #[async_trait]
 pub trait Service {
     async fn get_auth(&self, key: &str) -> Result<Authentication, String>;
 }
-pub type ServiceMap = HashMap<String, Box<dyn Service + Send + Sync>>;
+pub type BoxService = Box<dyn Service + Send + Sync>;
+pub type ServiceMap = HashMap<String, BoxService>;
 
 lazy_static! {
     pub static ref SERVICE_MAP: ServiceMap = {
