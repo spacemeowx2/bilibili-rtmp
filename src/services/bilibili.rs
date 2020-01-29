@@ -1,4 +1,4 @@
-use super::{async_trait, Authentication, Service, HashMap};
+use super::{async_trait, Authentication, Service};
 
 pub struct BilibiliService {
 
@@ -12,7 +12,8 @@ impl BilibiliService {
 
 #[async_trait]
 impl Service for BilibiliService {
-    async fn get_auth(&self, params: &HashMap<String, String>) -> Result<Authentication, String> {
+    async fn get_auth(&self, key: &str) -> Result<Authentication, String> {
+        // the key is cookie right now
         Err(String::from("Not implemented"))
     }
 }

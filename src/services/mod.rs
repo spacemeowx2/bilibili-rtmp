@@ -11,7 +11,7 @@ pub struct Authentication {
 
 #[async_trait]
 pub trait Service {
-    async fn get_auth(&self, params: &HashMap<String, String>) -> Result<Authentication, String>;
+    async fn get_auth(&self, key: &str) -> Result<Authentication, String>;
 }
 pub type ServiceMap = HashMap<String, Box<dyn Service + Send + Sync>>;
 
