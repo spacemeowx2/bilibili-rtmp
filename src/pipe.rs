@@ -1,11 +1,13 @@
 use rml_rtmp::handshake::{Handshake, PeerType, HandshakeProcessResult};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
+use tokio::sync::mpsc::{self, Sender, Receiver};
 use tokio::prelude::*;
 use bytes::{Bytes, BytesMut, BufMut};
 use rml_rtmp::sessions::{ServerSession, ServerSessionConfig, ServerSessionResult, ServerSessionEvent, ServerSessionError};
+use rml_rtmp::sessions::{ClientSession, ClientSessionConfig, ClientSessionResult, ClientSessionEvent};
 use crate::services::{Service, ServiceMap, BoxService, Authentication};
 use std::collections::HashMap;
-use url::{Url, ParseError};
+use url::{Url, ParseError, Position};
 
 #[derive(Debug, Fail)]
 pub enum ServerError {
@@ -19,6 +21,8 @@ pub enum ServerError {
     StateError(String),
     #[fail(display = "Client Error: {}", 0)]
     ClientError(String),
+    #[fail(display = "Parse Error: {}", 0)]
+    ParseError(ParseError),
 }
 
 impl From<io::Error> for ServerError {
@@ -36,6 +40,12 @@ impl From<ServerSessionError> for ServerError {
 impl From<String> for ServerError {
     fn from(error: String) -> Self {
         ServerError::ClientError(error)
+    }
+}
+
+impl From<ParseError> for ServerError {
+    fn from(error: ParseError) -> Self {
+        ServerError::ParseError(error)
     }
 }
 
@@ -106,23 +116,26 @@ impl Server {
     }
 
     async fn handle_session_result(&mut self, socket: &mut TcpStream, session: &mut ServerSession, session_results: Vec<ServerSessionResult>) -> Result<(), ServerError> {
+        use ServerSessionEvent::*;
+        use ServerSessionResult::*;
+
         let mut next: Vec<ServerSessionResult> = vec![];
         let mut round = session_results;
         while round.len() > 0 {
             for result in round {
                 match result {
-                    ServerSessionResult::OutboundResponse(packet) => {
+                    OutboundResponse(packet) => {
                         socket.write_all(&packet.bytes[..]).await?;
                         socket.flush().await?;
                     },
-                    ServerSessionResult::RaisedEvent(ServerSessionEvent::ConnectionRequested {
+                    RaisedEvent(ConnectionRequested {
                         request_id,
                         app_name,
                     }) => {
                         println!("ConnectionRequested: {:?} {:?}", request_id, app_name);
                         next.append(&mut session.accept_request(request_id)?);
                     },
-                    ServerSessionResult::RaisedEvent(ServerSessionEvent::PublishStreamRequested {
+                    RaisedEvent(PublishStreamRequested {
                         request_id,
                         app_name,
                         stream_key,
@@ -130,8 +143,7 @@ impl Server {
                     }) => {
                         let service = self.map.get(&app_name);
                         if let Some(service) = service {
-                            let mut client = Client::new(service);
-                            client.connect(&stream_key).await?;
+                            let client = Client::new(service, &stream_key).await?;
                             self.channel.insert(
                                 AppKey(app_name, stream_key),
                                 client
@@ -142,20 +154,24 @@ impl Server {
                             socket.shutdown().await?;
                         }
                     },
-                    ServerSessionResult::RaisedEvent(ServerSessionEvent::AudioDataReceived {
+                    RaisedEvent(AudioDataReceived {
+                        app_name,
+                        stream_key,
+                        data,
+                        timestamp,
+                    }) => {
+                        if let Some(fuck) = self.channel.get(&AppKey(app_name, stream_key)) {
+
+                        }
+                    },
+                    RaisedEvent(VideoDataReceived {
                         app_name,
                         stream_key,
                         data,
                         timestamp,
                     }) => {},
-                    ServerSessionResult::RaisedEvent(ServerSessionEvent::VideoDataReceived {
-                        app_name,
-                        stream_key,
-                        data,
-                        timestamp,
-                    }) => {},
-                    ServerSessionResult::RaisedEvent(ServerSessionEvent::UnhandleableAmf0Command { .. }) => {},
-                    // ServerSessionResult::RaisedEvent(ServerSessionEvent::StreamMetadataChanged {
+                    RaisedEvent(UnhandleableAmf0Command { .. }) => {},
+                    // RaisedEvent(StreamMetadataChanged {
                     //     app_name,
                     //     stream_key,
                     //     metadata,
@@ -225,32 +241,168 @@ impl Server {
     }
 }
 
-enum ClientState {
-    Handshaking(Handshake),
-    Connecting,
+
+#[derive(Debug)]
+enum ClientEvent {
+    Read(Vec<u8>),
+    FromServer,
+    End,
 }
 
 struct Client {
-    state: ClientState,
-    service: &'static BoxService,
+    sender: Sender<ClientEvent>,
 }
 
 impl Client {
-    fn new(service: &'static BoxService) -> Self {
-        Self {
-            state: ClientState::Handshaking(Handshake::new(PeerType::Client)),
-            service,
-        }
-    }
-    async fn connect(&mut self, key: &str) -> Result<(), ServerError> {
-        match &self.state {
-            ClientState::Handshaking(_handshake) => {
-                let Authentication { url, key } = self.service.get_auth(key).await?;
-                println!("Get URL and key: {}, {:?}", url, key);
+    async fn new(service: &'static BoxService, stream_key: &str) -> Result<Self, ServerError> {
+        let Authentication { url, key } = service.get_auth(stream_key).await?;
+        let url = Url::parse(&url)?;
+        let rtmp_endpoint = Self::get_connect(&url)?;
+        let app_name = url[Position::BeforePath..][1..].to_owned();
 
-                Ok(())
-            },
-            _ => Err(ServerError::StateError(String::from("should be Handshaking"))),
+        println!("client connect: {}", rtmp_endpoint);
+        let mut stream = TcpStream::connect(&rtmp_endpoint).await?;
+        let buffer = Self::do_handshake(&mut stream).await?;
+        let (mut read_half, write_half) = tokio::io::split(stream);
+        let (sender, receiver) = mpsc::channel::<ClientEvent>(1);
+        let mut read_sender = sender.clone();
+        tokio::spawn(async move {
+            loop {
+                let mut buf = vec![0u8; 4096];
+                match read_half.read_buf(&mut buf).await {
+                    // socket closed
+                    Ok(n) if n == 0 => break,
+                    Ok(n) => n,
+                    Err(e) => {
+                        eprintln!("failed to read from socket; err = {:?}", e);
+                        break;
+                    }
+                };
+                read_sender.send(ClientEvent::Read(buf)).await.unwrap();
+            }
+        });
+        tokio::spawn(async move {
+            Self::process(receiver, write_half, app_name, key).await
+        });
+
+        Ok(Self {
+            sender
+        })
+    }
+    async fn process<W: AsyncWrite + Unpin>(mut receiver: Receiver<ClientEvent>, mut write: W, app_name: String, key: Option<String>) -> Result<(), failure::Error>
+    {
+        let mut buffer = BytesMut::with_capacity(4096);
+        let (session, session_results) = ClientSession::new(ClientSessionConfig::new())?;
+
+        println!("client process: {}, {:?}", app_name, key);
+
+        loop {
+            match receiver.recv().await {
+                Some(ClientEvent::Read(buf)) => {
+                    buffer.extend_from_slice(&buf);
+
+                    while buffer.len() > 0 {
+                        new_state = match &mut state {
+                            ClientState::Handshaking(handshake) => {
+                                Self::handle_handshake(&mut write, handshake, &mut buffer).await?
+                            },
+                            _ => None,
+                        };
+                        if let Some(new_state) = new_state {
+                            state = new_state;
+                        }
+                    }
+                },
+                _ => break,
+            }
         }
+        Ok(())
+    }
+    async fn do_handshake(socket: &mut TcpStream) -> Result<BytesMut, ServerError> {
+        let mut buffer = BytesMut::with_capacity(4096);
+        let mut handshake = Handshake::new(PeerType::Client);
+
+        loop {
+            match socket.read_buf(&mut buffer).await {
+                // socket closed
+                Ok(n) if n == 0 => break,
+                Ok(n) => n,
+                Err(e) => {
+                    eprintln!("failed to read from socket; err = {:?}", e);
+                    break;
+                }
+            };
+            let result = match handshake.process_bytes(&buffer) {
+                Ok(result) => result,
+                Err(error) => {
+                    println!("Client Handshake error: {:?}", error);
+                    return Err(ServerError::SocketClosed);
+                }
+            };
+            buffer.clear();
+
+            match result {
+                HandshakeProcessResult::InProgress {response_bytes} => {
+                    if response_bytes.len() > 0 {
+                        socket.write_all(&response_bytes).await?;
+                    }
+                },
+
+                HandshakeProcessResult::Completed {response_bytes, remaining_bytes} => {
+                    println!("Client Handshake successful!");
+                    if response_bytes.len() > 0 {
+                        socket.write_all(&response_bytes).await?;
+                    }
+
+                    buffer.put(&remaining_bytes[..]);
+
+                    return Ok(buffer)
+                }
+            }
+        }
+
+        Err(String::from("client handshake error").into())
+    }
+    // async fn handle_handshake<W: AsyncWrite + Unpin>(socket: &mut W, handshake: &mut Handshake, bytes: &mut BytesMut) -> Result<Option<ClientState>, ServerError> {
+    //     let result = match handshake.process_bytes(bytes) {
+    //         Ok(result) => result,
+    //         Err(error) => {
+    //             println!("Client Handshake error: {:?}", error);
+    //             return Err(ServerError::SocketClosed);
+    //         }
+    //     };
+    //     bytes.clear();
+
+    //     match result {
+    //         HandshakeProcessResult::InProgress {response_bytes} => {
+    //             if response_bytes.len() > 0 {
+    //                 socket.write_all(&response_bytes).await?;
+    //             }
+
+    //             Ok(None)
+    //         },
+
+    //         HandshakeProcessResult::Completed {response_bytes, remaining_bytes} => {
+    //             println!("Client Handshake successful!");
+    //             if response_bytes.len() > 0 {
+    //                 socket.write_all(&response_bytes).await?;
+    //             }
+
+    //             bytes.put(&remaining_bytes[..]);
+
+    //             Ok(Some(ClientState::Connected))
+    //         }
+    //     }
+    // }
+    fn get_connect(url: &Url) -> Result<String, ServerError> {
+        if url.scheme() != "rtmp" {
+            return Err(String::from("protocol error").into())
+        }
+        let host = match url.host() {
+            Some(host) => host,
+            None => return Err(String::from("get_auth failed: no host").into())
+        };
+        let port = url.port().unwrap_or(1935);
+        Ok(format!("{}:{}", host, port))
     }
 }
