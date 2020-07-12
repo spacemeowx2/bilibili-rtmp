@@ -7,13 +7,13 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-rml_rtmp = "0.3.0"
+rml_rtmp = "0.3.2"
 headless_chrome = "0.9.0"
-failure = "0.1.6"
-tokio = { version = "0.2.9", features = ["full"] }
-bytes = "0.5.4"
-async-trait = "0.1.22"
+thiserror = "1.0.20"
+tokio = { version = "0.2.21", features = ["full"] }
+bytes = "0.5.5"
+async-trait = "0.1.36"
 lazy_static = "1.4.0"
-reqwest = { version = "0.10.1", features = ["json"] }
+reqwest = { version = "0.10.6", features = ["json"] }
 serde = { version = "1.0", features = ["derive"] }
 url = "2.1.1"
